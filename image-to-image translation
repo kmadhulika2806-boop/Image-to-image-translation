@@ -1,0 +1,88 @@
+import os
+import torch
+import torch.nn as nn
+from PIL import Image
+from torch.utils.data import Dataset, DataLoader
+import torchvision.transforms as T
+
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+SIZE, BATCH, EPOCHS = 128, 4, 20
+
+class ImageDataset(Dataset):
+    def __init__(self, x_dir, y_dir):
+        self.x_dir, self.y_dir = x_dir, y_dir
+        self.files = sorted(os.listdir(x_dir))
+        self.tf = T.Compose([
+            T.Resize((SIZE, SIZE)),
+            T.ToTensor(),
+            T.Normalize((.5,.5,.5), (.5,.5,.5))
+        ])
+
+    def __len__(self):
+        return len(self.files)
+
+    def __getitem__(self, i):
+        name = self.files[i]
+        x = Image.open(os.path.join(self.x_dir, name)).convert("RGB")
+        y = Image.open(os.path.join(self.y_dir, name)).convert("RGB")
+        return self.tf(x), self.tf(y)
+
+class Generator(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(3, 64, 4, 2, 1), nn.ReLU(),
+            nn.Conv2d(64, 128, 4, 2, 1), nn.BatchNorm2d(128),
+            nn.ReLU(),
+            nn.Conv2d(128, 256, 4, 2, 1), nn.BatchNorm2d(256),
+            nn.ReLU(),
+            nn.ConvTranspose2d(256, 128, 4, 2, 1),
+            nn.BatchNorm2d(128), nn.ReLU(),
+            nn.ConvTranspose2d(128, 64, 4, 2, 1),
+            nn.BatchNorm2d(64), nn.ReLU(),
+            nn.ConvTranspose2d(64, 3, 4, 2, 1), nn.Tanh()
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+data = ImageDataset("data/input", "data/target")
+loader = DataLoader(data, batch_size=BATCH, shuffle=True)
+
+model = Generator().to(DEVICE)
+loss_fn = nn.L1Loss()
+optimizer = torch.optim.Adam(model.parameters(), lr=0.0002)
+
+for epoch in range(EPOCHS):
+    total = 0
+    for x, y in loader:
+        x, y = x.to(DEVICE), y.to(DEVICE)
+        optimizer.zero_grad()
+        output = model(x)
+        loss = loss_fn(output, y)
+        loss.backward()
+        optimizer.step()
+        total += loss.item()
+
+    print(f"Epoch {epoch+1}/{EPOCHS} Loss: {total/len(loader):.4f}")
+
+torch.save(model.state_dict(), "image_translation_model.pth")
+
+def translate(path):
+    model.eval()
+    image = Image.open(path).convert("RGB")
+    transform = T.Compose([
+        T.Resize((SIZE, SIZE)),
+        T.ToTensor(),
+        T.Normalize((.5,.5,.5), (.5,.5,.5))
+    ])
+    x = transform(image).unsqueeze(0).to(DEVICE)
+    with torch.no_grad():
+        result = model(x)[0]
+    result = (result * .5 + .5).clamp(0, 1)
+    result = T.ToPILImage()(result.cpu())
+    result.save("translated_image.png")
+    return result
+
+translate("test.jpg")
+print("Image translation completed!")
